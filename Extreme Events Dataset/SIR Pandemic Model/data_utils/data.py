@@ -18,7 +18,7 @@ def map_def(beta,gamma,delta,N,I0,T,dt,f):
         R[tt+1] = R[tt] + dR;
     return I
 
-def Theta_to_U(noise,Theta,nsteps,coarse,udim):
+def Theta_to_U(noise,Theta,nsteps,coarse, udim):
         U1 = noise.get_sample(np.transpose(Theta))
         
         NN_grid = np.linspace(0,1,nsteps)
@@ -31,16 +31,20 @@ def Theta_to_U(noise,Theta,nsteps,coarse,udim):
         
         coarser_inds = np.linspace(0,nsteps-1,int(nsteps/coarse)).astype(int)
         U = U[:,coarser_inds]
-        return U
+        return U.astype(np.float32)
 
 def Theta_to_Z(Theta,udim):
         if Theta.shape[1] == udim:
             Z = np.ones((Theta.shape[0], 1))
         else:
             Z = Theta[:,(udim+1):Theta.shape[1]]
-        return Z
+        return Z.astype(np.float32)
 
 # These functions are defined for normalizing, standardizing, or flatenining interal to DeepONet
 def DNO_Y_transform(x):
     x_transform = np.log10(x)/10 - 0.5
-    return x_transform
+    return x_transform.astype(np.float32)
+
+def DNO_Y_itransform(x_transform):
+        x = 10**((x_transform+0.5)*10)
+        return x

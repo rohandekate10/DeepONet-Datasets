@@ -12,26 +12,26 @@ def get_data(
     idx = np.random.choice(100000, size=N, replace=False)
 
     d = np.load(fname_train)
-    X_branch = d["X0"][idx] # f
-    X_trunk = d["X1"][idx] # x
+    X_branch = d["X0"][idx].astype(np.float32) # f
+    X_trunk = d["X1"][idx].astype(np.float32) # x
     if stackbranch:
         X_branch = np.hstack((d["X0"][idx], d["y_low"][idx]))
     if stacktrunk:
         X_trunk = np.hstack((d["X1"][idx], d["y_low_x"][idx]))
     X_train = (X_branch, X_trunk) #(u_train, y_train)
-    y_train = d["y"][idx] # u_HF
+    y_train = d["y"][idx].astype(np.float32) # u_HF
     if residual:
         y_train -= d["y_low_x"][idx] # x_LF
 
     d = np.load(fname_test)
-    X_branch = d["X0"]
-    X_trunk = d["X1"]
+    X_branch = d["X0"].astype(np.float32)
+    X_trunk = d["X1"].astype(np.float32)
     if stackbranch:
         X_branch = np.hstack((d["X0"], d["y_low"]))
     if stacktrunk:
         X_trunk = np.hstack((d["X1"], d["y_low_x"]))
     X_test = (X_branch, X_trunk)
-    y_test = d["y"]
+    y_test = d["y"].astype(np.float32)
     if residual:
         y_test -= d["y_low_x"]
     return X_train, y_train, X_test, y_test
