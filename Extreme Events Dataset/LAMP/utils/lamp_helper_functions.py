@@ -1,6 +1,8 @@
 import os
 import numpy as np
 import sklearn as sk
+import scipy
+from scipy.interpolate import InterpolatedUnivariateSpline
 
 
 #####################
@@ -184,3 +186,145 @@ def DNO_Y_transform(x, decimation_factor = 3):
 def DNO_Y_itransform(x_transform, decimation_factor = 3):
     x = x_transform*decimation_factor
     return x
+
+def calc_VBM_from_Q(q_list, v_vbm, w_vbm, vv_var, n_q_modes=0):
+    if n_q_modes==0:
+        n_q_modes = q_list.shape[0]
+    zz = np.matmul(q_list, np.transpose(v_vbm[:, 0:n_q_modes]*np.sqrt(w_vbm[0:n_q_modes])))
+    zz_scale = zz*np.sqrt(vv_var)
+    return zz_scale
+
+# Active Samping Things
+#####################
+    
+#
+# Peel out the Active Sampling calculation into a function, so that we
+# can call it on different sets of points for AS and for error calculations
+#
+
+def acq_calculation_rom(model_list, Theta_test, inputs, qq_xx=np.linspace(-10,10,10000), 
+                    input_rule='grd', sigma_n=0, numerical_eps=1*10**-16, acq_rule='US_LW',
+                    cur_mode=0, as_target_quantity='mode-coefficient', n_q_modes=2,
+                    v_vbm=1, w_vbm=1, vv_var=1):
+    
+    test_pts = Theta_test.shape[0] 
+    Mean_Val, Var_Val = acq_evaluate_rom(model_list, Theta_test,sigma_n=sigma_n,
+                        cur_mode=cur_mode, as_target_quantity=as_target_quantity, n_q_modes=n_q_modes,
+                        v_vbm=v_vbm, w_vbm=w_vbm, vv_var=vv_var)
+            
+    # Determine Bounds for evaluating the metric
+    x_max = np.max(Mean_Val)
+    x_min = np.min(Mean_Val)
+    x_int = np.linspace(x_min,x_max,10000) # Linearly space points
+    #x_int_standard = np.linspace(-10,10,10000) # Static for pt-wise comparisons
+    x_int_standard = qq_xx
+
+    # Create the weights/exploitation values
+    if input_rule=='pdf' :
+        px = np.ones([Theta_test.shape[0],])
+    else :
+        px = inputs.pdf(Theta_test)
+        
+    sc = scipy.stats.gaussian_kde(Mean_Val.reshape(test_pts,), weights=px)   # Fit a guassian kde using px input weights
+    py = sc.evaluate(x_int) # Evaluate at x_int
+    py[py<numerical_eps] = numerical_eps # Eliminate spuriously small values (smaller than numerical precision)
+    py_standard = sc.evaluate(x_int_standard) # Evaluate for pt-wise comparisons
+    py_interp = InterpolatedUnivariateSpline(x_int, py, k=1) # Create interpolation function
+    
+    # Construct the weights
+    wx = px.reshape(test_pts)/py_interp(Mean_Val ).reshape(test_pts)
+    wx = wx.reshape(test_pts,1)
+    
+    # Compute the acquisition values
+    if  acq_rule=='US_LW' :
+        ax = wx.reshape(test_pts, )*Var_Val.reshape(test_pts, )  # This is simply w(\theta) \sigma^2(\theta) - note that x and \theta are used interchangably
+    elif acq_rule == 'US' :
+        ax = Var_Val
+    elif acq_rule == 'US_SJ' :
+        ax = wx*(Var_Val**6)
+    elif acq_rule =='KUS_LW' :
+        sig02 = np.min(Var_Val.reshape(test_pts, ))
+        print('Estimated sig02:  {}'.format(sig02))
+        ax = wx.reshape(test_pts, )*( Var_Val.reshape(test_pts, ) - sig02)
+    elif acq_rule == 'RAND' :
+        ax = np.random.randn(test_pts, 1)
+        ax.reshape((test_pts, ))
+        
+    
+    return Mean_Val, Var_Val, wx, ax, py, py_standard, x_int, x_int_standard
+
+#
+# Fall through a case structure that computes the AS scalar quantity differently
+# depending on what we're looking for
+#
+# n_vbm_ensemble:   how many draws from the NN `posterior' should be called in
+#                   order to compute the sample variance of the VBM.  Unlike the
+#                   NN ensemble, this quantity should be more than de minimis
+#
+# nn_ensemble_var_rule:  at first I was calculating the 
+#
+def acq_evaluate_rom(model_list, Theta_test, sigma_n=0,
+                    cur_mode=0, as_target_quantity='mode-coefficient', n_q_modes=2,
+                    v_vbm=1, w_vbm=1, vv_var=1, n_vbm_ensemble = 25, nn_ensemble_var_rule = 'sum-var'):
+    test_pts = Theta_test.shape[0] 
+    n_t = v_vbm.shape[1]
+    
+    if as_target_quantity == 'mode-coefficient':
+        cur_mean, Var_Val = model_list[cur_mode].predict(Theta_test)
+        
+        if sigma_n != 0 :
+            Mean_Val = cur_mean + np.random.randn(cur_mean.shape[0], 1)*sigma_n
+        else:
+            Mean_Val = cur_mean
+            
+    elif (as_target_quantity == 'vbm-interval-max') | (as_target_quantity == 'vbm-interval-min'):
+        mu_list = np.zeros((test_pts, n_q_modes))
+        var_list = np.zeros((test_pts, n_q_modes))
+        
+        for k in range(0, n_q_modes):
+            Mean_Val, Var_Val = model_list[cur_mode].predict(Theta_test)
+            mu_list[:, k] = Mean_Val.ravel()
+            var_list[:, k] = Var_Val.ravel()
+            
+        if nn_ensemble_var_rule == 'mc' :
+            
+            Mean_Val = np.zeros((test_pts, ))
+            Var_Val = np.zeros((test_pts, ))
+                
+            for k in range(0, test_pts):
+                q_list = np.zeros((n_vbm_ensemble, n_q_modes))
+                vbm_list = np.zeros((n_vbm_ensemble, n_t))
+                for j in range(0, n_vbm_ensemble) :
+                    q_list[j, :] = mu_list[k, :] + np.random.randn(n_q_modes,)*np.sqrt( var_list[k, :])
+                    vbm_list[j, :] = calc_VBM_from_Q( q_list[j, :], v_vbm, w_vbm, vv_var, n_q_modes=n_q_modes)
+                    
+                if as_target_quantity == 'vbm-interval-max' :
+                    cur_maxes = np.amax(vbm_list, axis=1)
+                    cur_mean= np.mean(cur_maxes)
+                    cur_val = np.var(cur_maxes)
+                else : # as_target_quantity == 'vbm-interval-min' :
+                    cur_mins = np.amin(vbm_list, axis=1)
+                    cur_mean= np.mean(cur_mins)
+                    cur_val = np.var(cur_mins)
+                
+                Mean_Val[k] = cur_mean
+                Var_Val[k] = cur_val
+                
+        elif nn_ensemble_var_rule == 'sum-var' : 
+            cur_vbm = calc_VBM_from_Q(mu_list, v_vbm, w_vbm, vv_var, n_q_modes=n_q_modes)
+            cur_vbm_var = calc_VBM_from_Q(var_list, v_vbm, w_vbm, vv_var, n_q_modes=n_q_modes)
+            
+            cur_maxes = np.amax(cur_vbm, axis=1)
+            ii = np.argmax(cur_vbm, axis=1)
+            
+            Mean_Val = cur_maxes
+            Var_Val = np.zeros(cur_vbm_var.shape[0], )
+            for k in range(0, cur_vbm_var.shape[0]) :
+                Var_Val[k] = cur_vbm_var[k, ii[k]]
+            
+        
+    else:
+        print('Uh-oh!  {} not recognized!'.format(as_target_quantity))
+        
+
+    return Mean_Val, Var_Val
